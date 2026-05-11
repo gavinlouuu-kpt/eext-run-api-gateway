@@ -55,6 +55,21 @@
 						"id": "About",
 						"title": "About...",
 						"registerFn": "about"
+					},
+					{
+						"id": "LoginWithChatGPT",
+						"title": "Login with ChatGPT",
+						"registerFn": "loginWithChatGPT"
+					},
+					{
+						"id": "LogoutChatGPT",
+						"title": "Logout ChatGPT",
+						"registerFn": "logoutChatGPT"
+					},
+					{
+						"id": "ChatGPTStatus",
+						"title": "ChatGPT Status",
+						"registerFn": "chatGPTStatus"
 					}
 				]
 			}
@@ -83,6 +98,21 @@
 						"id": "About",
 						"title": "About...",
 						"registerFn": "about"
+					},
+					{
+						"id": "LoginWithChatGPT",
+						"title": "Login with ChatGPT",
+						"registerFn": "loginWithChatGPT"
+					},
+					{
+						"id": "LogoutChatGPT",
+						"title": "Logout ChatGPT",
+						"registerFn": "logoutChatGPT"
+					},
+					{
+						"id": "ChatGPTStatus",
+						"title": "ChatGPT Status",
+						"registerFn": "chatGPTStatus"
 					}
 				]
 			}
@@ -111,6 +141,21 @@
 						"id": "About",
 						"title": "About...",
 						"registerFn": "about"
+					},
+					{
+						"id": "LoginWithChatGPT",
+						"title": "Login with ChatGPT",
+						"registerFn": "loginWithChatGPT"
+					},
+					{
+						"id": "LogoutChatGPT",
+						"title": "Logout ChatGPT",
+						"registerFn": "logoutChatGPT"
+					},
+					{
+						"id": "ChatGPTStatus",
+						"title": "ChatGPT Status",
+						"registerFn": "chatGPTStatus"
 					}
 				]
 			}
@@ -139,6 +184,21 @@
 						"id": "About",
 						"title": "About...",
 						"registerFn": "about"
+					},
+					{
+						"id": "LoginWithChatGPT",
+						"title": "Login with ChatGPT",
+						"registerFn": "loginWithChatGPT"
+					},
+					{
+						"id": "LogoutChatGPT",
+						"title": "Logout ChatGPT",
+						"registerFn": "logoutChatGPT"
+					},
+					{
+						"id": "ChatGPTStatus",
+						"title": "ChatGPT Status",
+						"registerFn": "chatGPTStatus"
 					}
 				]
 			}
@@ -167,6 +227,21 @@
 						"id": "About",
 						"title": "About...",
 						"registerFn": "about"
+					},
+					{
+						"id": "LoginWithChatGPT",
+						"title": "Login with ChatGPT",
+						"registerFn": "loginWithChatGPT"
+					},
+					{
+						"id": "LogoutChatGPT",
+						"title": "Logout ChatGPT",
+						"registerFn": "logoutChatGPT"
+					},
+					{
+						"id": "ChatGPTStatus",
+						"title": "ChatGPT Status",
+						"registerFn": "chatGPTStatus"
 					}
 				]
 			}
@@ -195,6 +270,21 @@
 						"id": "About",
 						"title": "About...",
 						"registerFn": "about"
+					},
+					{
+						"id": "LoginWithChatGPT",
+						"title": "Login with ChatGPT",
+						"registerFn": "loginWithChatGPT"
+					},
+					{
+						"id": "LogoutChatGPT",
+						"title": "Logout ChatGPT",
+						"registerFn": "logoutChatGPT"
+					},
+					{
+						"id": "ChatGPTStatus",
+						"title": "ChatGPT Status",
+						"registerFn": "chatGPTStatus"
 					}
 				]
 			}
