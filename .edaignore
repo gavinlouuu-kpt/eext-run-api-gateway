@@ -5,6 +5,7 @@
 /config/
 /coverage/
 /node_modules/
+/server/
 /src/
 /.editorconfig
 /.gitattributes

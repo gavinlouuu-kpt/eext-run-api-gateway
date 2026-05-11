@@ -521,6 +521,31 @@ npm run server
 
 服务器会自动在 `49620-49629` 之间寻找可用端口。此时再打开嘉立创EDA，并确保本扩展已经加载，就可以进入本地联调模式。
 
+如果你要跳过 OpenCode / Skill，直接使用本仓库内置的 GPT Actions OAuth Bridge Server，可以在本仓库执行：
+
+```bash
+npm install
+npm run server
+```
+
+内置服务同样会监听 `49620-49629` 端口范围，并提供：
+
+- `GET /health`：健康检查
+- `GET /openapi.yaml`：GPT Action OpenAPI schema
+- `GET /oauth/authorize` 与 `POST /oauth/token`：开发用 OAuth authorization-code 流程
+- `GET /status`、`GET /windows`、`POST /execute`：需要 `Authorization: Bearer <token>` 的桥接 API
+
+用于 ChatGPT / GPT Actions 时，请先把本地服务放到 HTTPS 公网地址后面，并设置：
+
+```bash
+GPT_ACTION_BASE_URL=https://your-gateway.example.com
+GPT_OAUTH_CLIENT_ID=easyeda-gpt
+GPT_OAUTH_CLIENT_SECRET=<change-me>
+npm run server
+```
+
+然后在 GPT Actions 里导入 `https://your-gateway.example.com/openapi.yaml`，OAuth 配置填写同一域名下的 `/oauth/authorize` 与 `/oauth/token`。
+
 不过对于大多数用户，推荐优先使用上面的标准流程，也就是直接通过 OpenCode + **easyeda-api** Skill 完成自动连接。
 
 ## 菜单操作
@@ -531,6 +556,9 @@ npm run server
 | **Stop Connection** | 断开当前连接 |
 | **Toggle Auto-Connect Status** | 切换自动连接状态 |
 | **About...** | 显示版本和连接状态 |
+| **Login with ChatGPT** | 使用 ChatGPT 设备码流程登录 |
+| **Logout ChatGPT** | 清除本地保存的 ChatGPT 凭据 |
+| **ChatGPT Status** | 显示当前 ChatGPT 登录状态 |
 
 ## 开发
 
@@ -540,6 +568,9 @@ npm install
 
 # 编译扩展包
 npm run build
+
+# 启动内置 GPT Actions OAuth Bridge Server
+npm run server
 ```
 
 编译后在 `./build/dist/` 下生成 `.eext` 扩展包文件，可在嘉立创EDA专业版中安装。
