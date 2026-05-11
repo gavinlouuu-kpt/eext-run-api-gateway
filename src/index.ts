@@ -20,6 +20,18 @@ import * as extensionConfig from '../extension.json';
 
 // ─── 配置 ───────────────────────────────────────────────────────────
 const WS_ID = 'ai-bridge';
+const OPENAI_AUTH_BASE_URL = 'https://auth.openai.com';
+const OPENAI_CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
+const OPENAI_DEVICE_CODE_TIMEOUT_MS = 15 * 60_000;
+const OPENAI_DEVICE_CODE_DEFAULT_INTERVAL_MS = 5_000;
+const OPENAI_DEVICE_CODE_MIN_INTERVAL_MS = 1_000;
+const OPENAI_DEVICE_CALLBACK_URL = `${OPENAI_AUTH_BASE_URL}/deviceauth/callback`;
+
+const STORAGE_KEY_CHATGPT_ACCESS = 'chatgptAccessToken';
+const STORAGE_KEY_CHATGPT_REFRESH = 'chatgptRefreshToken';
+const STORAGE_KEY_CHATGPT_EXPIRES = 'chatgptExpiresAt';
+const STORAGE_KEY_CHATGPT_EMAIL = 'chatgptEmail';
+const STORAGE_KEY_CHATGPT_PLAN = 'chatgptPlanType';
 const PORT_START = 49620;
 const PORT_END = 49629;
 const SERVICE_ID = 'easyeda-bridge';
@@ -44,6 +56,14 @@ let windowId: string | null = null; // 窗口唯一标识符
 let isConnecting = false;
 let connectionSessionId = 0;
 let messageBusRegistered = false;
+
+interface ChatGPTCredentials {
+	access: string;
+	refresh: string;
+	expiresAt: number;
+	email?: string;
+	planType?: string;
+}
 
 interface GatewayControlRequest {
 	command: 'reconnect' | 'stop';
@@ -159,6 +179,286 @@ async function dispatchControlCommand(command: GatewayControlRequest['command'])
 	}
 }
 
+// ─── ChatGPT OAuth ───────────────────────────────────────────────────
+
+function decodeBase64Url(str: string): string {
+	const padded = str.replace(/-/g, '+').replace(/_/g, '/');
+	const rem = padded.length % 4;
+	const b64 = rem ? padded + '='.repeat(4 - rem) : padded;
+	return atob(b64);
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+	const parts = token.split('.');
+	if (parts.length !== 3)
+		return null;
+	try {
+		const raw = decodeBase64Url(parts[1]);
+		const parsed = JSON.parse(raw);
+		return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
+	}
+	catch {
+		return null;
+	}
+}
+
+function resolveAuthIdentity(accessToken: string): { email?: string; planType?: string } {
+	const payload = decodeJwtPayload(accessToken);
+	if (!payload)
+		return {};
+	const profile = payload['https://api.openai.com/profile'];
+	const auth = payload['https://api.openai.com/auth'];
+	const email
+		= profile && typeof profile === 'object' && 'email' in profile && typeof (profile as Record<string, unknown>).email === 'string'
+			? ((profile as Record<string, unknown>).email as string)
+			: undefined;
+	const planType
+		= auth && typeof auth === 'object' && 'chatgpt_plan_type' in auth && typeof (auth as Record<string, unknown>).chatgpt_plan_type === 'string'
+			? ((auth as Record<string, unknown>).chatgpt_plan_type as string)
+			: undefined;
+	return { email, planType };
+}
+
+function resolveTokenExpiry(accessToken: string): number | undefined {
+	const payload = decodeJwtPayload(accessToken);
+	const exp = payload?.exp;
+	if (typeof exp === 'number' && Number.isFinite(exp) && exp > 0)
+		return Math.trunc(exp) * 1000;
+	return undefined;
+}
+
+function loadStoredCredentials(): ChatGPTCredentials | null {
+	const access = eda.sys_Storage.getExtensionUserConfig(STORAGE_KEY_CHATGPT_ACCESS);
+	const refresh = eda.sys_Storage.getExtensionUserConfig(STORAGE_KEY_CHATGPT_REFRESH);
+	const expiresAt = eda.sys_Storage.getExtensionUserConfig(STORAGE_KEY_CHATGPT_EXPIRES);
+	if (typeof access !== 'string' || typeof refresh !== 'string' || typeof expiresAt !== 'number')
+		return null;
+	const email = eda.sys_Storage.getExtensionUserConfig(STORAGE_KEY_CHATGPT_EMAIL);
+	const planType = eda.sys_Storage.getExtensionUserConfig(STORAGE_KEY_CHATGPT_PLAN);
+	return {
+		access,
+		refresh,
+		expiresAt,
+		email: typeof email === 'string' ? email : undefined,
+		planType: typeof planType === 'string' ? planType : undefined,
+	};
+}
+
+function saveCredentials(creds: ChatGPTCredentials): void {
+	void eda.sys_Storage.setExtensionUserConfig(STORAGE_KEY_CHATGPT_ACCESS, creds.access);
+	void eda.sys_Storage.setExtensionUserConfig(STORAGE_KEY_CHATGPT_REFRESH, creds.refresh);
+	void eda.sys_Storage.setExtensionUserConfig(STORAGE_KEY_CHATGPT_EXPIRES, creds.expiresAt);
+	void eda.sys_Storage.setExtensionUserConfig(STORAGE_KEY_CHATGPT_EMAIL, creds.email ?? '');
+	void eda.sys_Storage.setExtensionUserConfig(STORAGE_KEY_CHATGPT_PLAN, creds.planType ?? '');
+}
+
+function clearCredentials(): void {
+	void eda.sys_Storage.setExtensionUserConfig(STORAGE_KEY_CHATGPT_ACCESS, '');
+	void eda.sys_Storage.setExtensionUserConfig(STORAGE_KEY_CHATGPT_REFRESH, '');
+	void eda.sys_Storage.setExtensionUserConfig(STORAGE_KEY_CHATGPT_EXPIRES, 0);
+	void eda.sys_Storage.setExtensionUserConfig(STORAGE_KEY_CHATGPT_EMAIL, '');
+	void eda.sys_Storage.setExtensionUserConfig(STORAGE_KEY_CHATGPT_PLAN, '');
+}
+
+function isTokenExpired(creds: ChatGPTCredentials): boolean {
+	return creds.expiresAt < Date.now() + 60_000;
+}
+
+function chatgptRequestHeaders(): Record<string, string> {
+	return {
+		'Content-Type': 'application/json',
+		'originator': 'eext-run-api-gateway',
+		'version': extensionConfig.version,
+		'User-Agent': `eext-run-api-gateway/${extensionConfig.version}`,
+	};
+}
+
+function parseJsonObject(text: string): Record<string, unknown> | null {
+	try {
+		const parsed = JSON.parse(text);
+		return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
+	}
+	catch {
+		return null;
+	}
+}
+
+function trimString(value: unknown): string | undefined {
+	return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function normalizePositiveMs(value: unknown): number | undefined {
+	if (typeof value === 'number' && Number.isFinite(value) && value > 0)
+		return Math.trunc(value * 1000);
+	if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+		const s = Number.parseInt(value.trim(), 10);
+		return s > 0 ? s * 1000 : undefined;
+	}
+	return undefined;
+}
+
+async function requestDeviceCode(): Promise<{
+	deviceAuthId: string;
+	userCode: string;
+	intervalMs: number;
+}> {
+	const response = await fetch(`${OPENAI_AUTH_BASE_URL}/api/accounts/deviceauth/usercode`, {
+		method: 'POST',
+		headers: chatgptRequestHeaders(),
+		body: JSON.stringify({ client_id: OPENAI_CODEX_CLIENT_ID }),
+	});
+	const bodyText = await response.text();
+	if (!response.ok) {
+		throw new Error(`Device code request failed (HTTP ${response.status}): ${bodyText.slice(0, 200)}`);
+	}
+	const body = parseJsonObject(bodyText);
+	const deviceAuthId = trimString(body?.device_auth_id);
+	const userCode = trimString(body?.user_code) ?? trimString(body?.usercode);
+	if (!deviceAuthId || !userCode)
+		throw new Error('Device code response missing device_auth_id or user_code.');
+	return {
+		deviceAuthId,
+		userCode,
+		intervalMs: normalizePositiveMs(body?.interval) ?? OPENAI_DEVICE_CODE_DEFAULT_INTERVAL_MS,
+	};
+}
+
+function pollDeviceCode(params: {
+	deviceAuthId: string;
+	userCode: string;
+	intervalMs: number;
+}): Promise<{ authorizationCode: string; codeVerifier: string }> {
+	return new Promise((resolve, reject) => {
+		const deadline = Date.now() + OPENAI_DEVICE_CODE_TIMEOUT_MS;
+
+		const attempt = async () => {
+			if (Date.now() >= deadline) {
+				reject(new Error('ChatGPT device authorization timed out after 15 minutes.'));
+				return;
+			}
+
+			try {
+				const response = await fetch(`${OPENAI_AUTH_BASE_URL}/api/accounts/deviceauth/token`, {
+					method: 'POST',
+					headers: chatgptRequestHeaders(),
+					body: JSON.stringify({
+						device_auth_id: params.deviceAuthId,
+						user_code: params.userCode,
+					}),
+				});
+				const bodyText = await response.text();
+
+				if (response.ok) {
+					const body = parseJsonObject(bodyText);
+					const authorizationCode = trimString(body?.authorization_code);
+					const codeVerifier = trimString(body?.code_verifier);
+					if (!authorizationCode || !codeVerifier) {
+						reject(new Error('Device authorization response missing exchange code.'));
+						return;
+					}
+					resolve({ authorizationCode, codeVerifier });
+					return;
+				}
+
+				if (response.status === 403 || response.status === 404) {
+					const remaining = Math.max(0, deadline - Date.now());
+					const delay = Math.min(
+						Math.max(params.intervalMs, OPENAI_DEVICE_CODE_MIN_INTERVAL_MS),
+						remaining,
+					);
+					setTimeout(attempt, delay);
+					return;
+				}
+
+				reject(new Error(`Device authorization failed (HTTP ${response.status}): ${bodyText.slice(0, 200)}`));
+			}
+			catch (err) {
+				reject(err);
+			}
+		};
+
+		void attempt();
+	});
+}
+
+async function exchangeDeviceCode(params: {
+	authorizationCode: string;
+	codeVerifier: string;
+}): Promise<ChatGPTCredentials> {
+	const body = new URLSearchParams({
+		grant_type: 'authorization_code',
+		code: params.authorizationCode,
+		redirect_uri: OPENAI_DEVICE_CALLBACK_URL,
+		client_id: OPENAI_CODEX_CLIENT_ID,
+		code_verifier: params.codeVerifier,
+	});
+	const response = await fetch(`${OPENAI_AUTH_BASE_URL}/oauth/token`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/x-www-form-urlencoded',
+			'originator': 'eext-run-api-gateway',
+			'version': extensionConfig.version,
+			'User-Agent': `eext-run-api-gateway/${extensionConfig.version}`,
+		},
+		body,
+	});
+	const bodyText = await response.text();
+	if (!response.ok)
+		throw new Error(`Token exchange failed (HTTP ${response.status}): ${bodyText.slice(0, 200)}`);
+
+	const payload = parseJsonObject(bodyText);
+	const access = trimString(payload?.access_token);
+	const refresh = trimString(payload?.refresh_token);
+	if (!access || !refresh)
+		throw new Error('Token exchange succeeded but did not return OAuth tokens.');
+
+	const expiresInMs
+		= typeof payload?.expires_in === 'number' && payload.expires_in > 0
+			? Math.trunc(payload.expires_in as number) * 1000
+			: undefined;
+	const expiresAt = expiresInMs ? Date.now() + expiresInMs : (resolveTokenExpiry(access) ?? Date.now());
+	const identity = resolveAuthIdentity(access);
+
+	return { access, refresh, expiresAt, ...identity };
+}
+
+async function refreshChatGPTToken(refreshToken: string): Promise<ChatGPTCredentials | null> {
+	try {
+		const body = new URLSearchParams({
+			grant_type: 'refresh_token',
+			refresh_token: refreshToken,
+			client_id: OPENAI_CODEX_CLIENT_ID,
+		});
+		const response = await fetch(`${OPENAI_AUTH_BASE_URL}/oauth/token`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/x-www-form-urlencoded',
+				'originator': 'eext-run-api-gateway',
+				'version': extensionConfig.version,
+				'User-Agent': `eext-run-api-gateway/${extensionConfig.version}`,
+			},
+			body,
+		});
+		if (!response.ok)
+			return null;
+		const payload = parseJsonObject(await response.text());
+		const access = trimString(payload?.access_token);
+		const refresh = trimString(payload?.refresh_token) ?? refreshToken;
+		if (!access)
+			return null;
+		const expiresInMs
+			= typeof payload?.expires_in === 'number' && payload.expires_in > 0
+				? Math.trunc(payload.expires_in as number) * 1000
+				: undefined;
+		const expiresAt = expiresInMs ? Date.now() + expiresInMs : (resolveTokenExpiry(access) ?? Date.now());
+		const identity = resolveAuthIdentity(access);
+		return { access, refresh, expiresAt, ...identity };
+	}
+	catch {
+		return null;
+	}
+}
+
 // ─── 生命周期 ────────────────────────────────────────────────────────
 
 /**
@@ -169,6 +469,14 @@ export function activate(status?: 'onStartupFinished', arg?: string): void {
 	ensureMessageBusServices();
 	const storedValue = eda.sys_Storage.getExtensionUserConfig(STORAGE_KEY_AUTO_CONNECT);
 	autoConnectEnabled = storedValue !== false;
+
+	const creds = loadStoredCredentials();
+	if (creds && isTokenExpired(creds)) {
+		void refreshChatGPTToken(creds.refresh).then((refreshed) => {
+			if (refreshed)
+				saveCredentials(refreshed);
+		});
+	}
 
 	if (autoConnectEnabled) {
 		void scanAndConnect();
@@ -242,6 +550,86 @@ export async function toggleAutoConnect(): Promise<void> {
  */
 export function stopConnection(): void {
 	void dispatchControlCommand('stop');
+}
+
+// ─── ChatGPT 菜单操作 ─────────────────────────────────────────────────
+
+/**
+ * 使用 ChatGPT 订阅登录（设备码流程）
+ */
+export async function loginWithChatGPT(): Promise<void> {
+	const existing = loadStoredCredentials();
+	if (existing && !isTokenExpired(existing)) {
+		const identity = existing.email ?? existing.planType ?? 'unknown';
+		eda.sys_Dialog.showInformationMessage(
+			`Already logged in as ${identity}.\nLogout first via "Logout ChatGPT" if you want to re-authenticate.`,
+			'ChatGPT Login',
+		);
+		return;
+	}
+
+	try {
+		eda.sys_Message.showToastMessage(eda.sys_I18n.text('Requesting ChatGPT device code...'));
+		const deviceCode = await requestDeviceCode();
+
+		eda.sys_Dialog.showInformationMessage(
+			`To authorize ChatGPT:\n\n1. Open your browser and visit:\n   https://auth.openai.com/codex/device\n\n2. Enter code:\n   ${deviceCode.userCode}\n\nClick OK after completing sign-in in your browser.`,
+			'ChatGPT Device Login',
+		);
+
+		eda.sys_Message.showToastMessage(eda.sys_I18n.text('Waiting for ChatGPT authorization...'));
+		const authorization = await pollDeviceCode({
+			deviceAuthId: deviceCode.deviceAuthId,
+			userCode: deviceCode.userCode,
+			intervalMs: deviceCode.intervalMs,
+		});
+
+		eda.sys_Message.showToastMessage(eda.sys_I18n.text('Exchanging ChatGPT token...'));
+		const creds = await exchangeDeviceCode(authorization);
+		saveCredentials(creds);
+
+		const planLabel = creds.planType ? ` (Plan: ${creds.planType})` : '';
+		const emailLabel = creds.email ? ` — ${creds.email}` : '';
+		eda.sys_Message.showToastMessage(
+			`${eda.sys_I18n.text('ChatGPT login successful')}${planLabel}${emailLabel}`,
+		);
+	}
+	catch (err: unknown) {
+		const message = err instanceof Error ? err.message : String(err);
+		eda.sys_Dialog.showInformationMessage(
+			`ChatGPT login failed:\n${message}`,
+			'ChatGPT Login Error',
+		);
+	}
+}
+
+/**
+ * 登出 ChatGPT 并清除凭据（菜单项）
+ */
+export function logoutChatGPT(): void {
+	clearCredentials();
+	eda.sys_Message.showToastMessage(eda.sys_I18n.text('ChatGPT logged out'));
+}
+
+/**
+ * 显示 ChatGPT 登录状态（菜单项）
+ */
+export function chatGPTStatus(): void {
+	const creds = loadStoredCredentials();
+	if (!creds || !creds.access) {
+		eda.sys_Dialog.showInformationMessage('Not logged in to ChatGPT.', 'ChatGPT Status');
+		return;
+	}
+	const expired = isTokenExpired(creds);
+	const status = expired ? 'Expired' : 'Active';
+	const expiry = new Date(creds.expiresAt).toLocaleString();
+	const lines = [
+		`Status: ${status}`,
+		creds.email ? `Email: ${creds.email}` : '',
+		creds.planType ? `Plan: ${creds.planType}` : '',
+		`Expires: ${expiry}`,
+	].filter(Boolean).join('\n');
+	eda.sys_Dialog.showInformationMessage(lines, 'ChatGPT Status');
 }
 
 // ─── 端口扫描与连接 ──────────────────────────────────────────────────
@@ -360,10 +748,16 @@ function tryConnectToPort(port: number, sessionId: number): Promise<boolean> {
 								handshakeVerified = true;
 								// 生成窗口ID并注册到bridge
 								windowId = crypto.randomUUID();
+								const storedCreds = loadStoredCredentials();
+								const chatgptToken
+									= storedCreds && !isTokenExpired(storedCreds)
+										? storedCreds.access
+										: undefined;
 								eda.sys_WebSocket.send(WS_ID, JSON.stringify({
 									type: 'register',
 									windowId,
 									timestamp: Date.now(),
+									...(chatgptToken ? { chatgptToken } : {}),
 								}));
 								eda.sys_Message.showToastMessage(
 									`${eda.sys_I18n.text('Bridge connected (port ', undefined, undefined, String(port))})`,
